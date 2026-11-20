@@ -1,0 +1,49 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: dk, POSTGRES_PASSWORD: dk, POSTGRES_DB: dk_test }
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U dk" --health-interval 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec prettier --check .
+      - run: pnpm -r typecheck
+      - run: pnpm --filter @dk/frontend lint
+      - run: pnpm -r test
+        env: { TEST_DATABASE_URL: 'postgres://dk:dk@localhost:5432/dk_test' }
+      - run: pnpm -r build
+      - name: End-to-end
+        env:
+          DATABASE_URL: postgres://dk:dk@localhost:5432/dk_test
+          DATA_ENCRYPTION_KEY: ${{ secrets.CI_KEY || 'BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=' }}
+          HASH_PEPPER: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=
+          TOKEN_SECRET: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=
+          OTP_ECHO: 'true'
+          NODE_ENV: development
+        run: |
+          pnpm --filter @dk/backend exec node dist/database/cli.js seed --samples
+          cp -r apps/frontend/.next/static apps/frontend/.next/standalone/apps/frontend/.next/static
+          (cd apps/backend && node dist/server.js &)
+          (PORT=3000 HOSTNAME=127.0.0.1 node apps/frontend/.next/standalone/apps/frontend/server.js &)
+          npx wait-on -t 60000 http://127.0.0.1:4000/api/v1/health http://127.0.0.1:3000
+          pnpm --filter @dk/frontend exec playwright install --with-deps chromium
+          pnpm --filter @dk/frontend e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with: { name: playwright-report, path: apps/frontend/test-results }

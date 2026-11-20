@@ -1,0 +1,33 @@
+# Local full stack: Postgres, API, web and Nginx on http://localhost:8080
+# 1. cp apps/backend/.env.example .env.docker and fill the three keys
+# 2. docker compose up --build
+# 3. docker compose run --rm api node dist/database/cli.js migrate
+#    docker compose run --rm api node dist/database/cli.js seed --samples
+services:
+  db:
+    image: postgres:16-alpine
+    environment: { POSTGRES_USER: dk, POSTGRES_PASSWORD: dk, POSTGRES_DB: dk_finance }
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck: { test: ['CMD-SHELL', 'pg_isready -U dk'], interval: 5s, retries: 10 }
+  api:
+    build: { context: ., dockerfile: infra/docker/backend.Dockerfile }
+    env_file: .env.docker
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgres://dk:dk@db:5432/dk_finance
+      CORS_ORIGINS: http://localhost:8080
+    depends_on: { db: { condition: service_healthy } }
+  web:
+    build:
+      context: .
+      dockerfile: infra/docker/frontend.Dockerfile
+      args: { NEXT_PUBLIC_SITE_URL: 'http://localhost:8080' }
+    environment: { API_INTERNAL_URL: 'http://api:4000/api/v1' }
+    depends_on: [api]
+  nginx:
+    image: nginx:1.27-alpine
+    ports: ['8080:80']
+    volumes: ['./infra/nginx/docker.conf:/etc/nginx/conf.d/default.conf:ro']
+    depends_on: [web, api]
+volumes:
+  pgdata:
