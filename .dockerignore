@@ -1,0 +1,29 @@
+# Keep the build context small and stop host-built files (Windows node_modules, .next) leaking into images.
+**/node_modules
+**/.next
+**/dist
+**/coverage
+**/test-results
+**/playwright-report
+**/*.tsbuildinfo
+**/*.log
+.git
+.github
+.cursor
+.vscode
+
+# Secrets never go into an image.
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Not needed to build
+docs
+infra
+backups
+*.md
+tools-svg.py
+postgres.log

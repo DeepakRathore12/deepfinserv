@@ -4,9 +4,14 @@ RUN corepack enable && corepack prepare pnpm@10.28.0 --activate
 WORKDIR /repo
 
 FROM base AS build
+# NEXT_PUBLIC_* values are compiled into the browser bundle, so they must be set at build time.
 ARG NEXT_PUBLIC_SITE_URL
 ARG NEXT_PUBLIC_GTM_ID
+ARG NEXT_PUBLIC_GA4_ID
+ARG NEXT_PUBLIC_GSC_VERIFICATION
 ARG NEXT_PUBLIC_ALLOW_INDEXING=false
+# Where the server-side pages reach the API. Also baked into Next's route table.
+ARG API_INTERNAL_URL=http://api:4000/api/v1
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json tsconfig.base.json ./
 COPY packages/shared/package.json packages/shared/
@@ -23,4 +28,5 @@ COPY --from=build --chown=node:node /repo/apps/frontend/.next/standalone ./
 COPY --from=build --chown=node:node /repo/apps/frontend/.next/static ./apps/frontend/.next/static
 USER node
 EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s CMD node -e "fetch('http://127.0.0.1:3000/robots.txt').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 CMD ["node", "apps/frontend/server.js"]

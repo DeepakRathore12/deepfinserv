@@ -1,5 +1,7 @@
 # Deployment (AWS EC2 + RDS)
 
+> Running everything in Docker on one EC2 server (database included)? Follow [deployment-docker.md](deployment-docker.md) instead. The rest of this page describes the PM2 + RDS route.
+
 ## One-time setup
 
 1. RDS PostgreSQL 16, private subnet, encryption at rest, automated backups (14 days), `rds.force_ssl=1`.

@@ -1,5 +1,5 @@
 import { LENDER_TYPES, PRODUCT_SLUGS } from '@dk/shared';
-import { Router } from 'express';
+import express, { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../config/db';
 import { LEAD_STATUSES } from '../../database/migrations/003_leads';
@@ -7,7 +7,8 @@ import { QUEUE_STATUSES } from '../../database/migrations/004_requests';
 import { requireAdmin, requireStaff } from '../../middlewares/auth';
 import { validate } from '../../middlewares/validate';
 import { decrypt } from '../../utils/crypto';
-import { notFound } from '../../utils/errors';
+import { AppError, notFound } from '../../utils/errors';
+import { LOGO_MAX_BYTES, logoPath, sniffImage } from '../lender-logos';
 import { audit } from './audit';
 import { authRouter } from './auth';
 
@@ -371,10 +372,27 @@ const lenderSchema = z.object({
   website: z.string().trim().url().max(200).nullable().optional(),
   grievanceContact: z.string().trim().max(300).nullable().optional(),
   active: z.boolean().default(true),
+  showOnHome: z.boolean().default(true),
+  displayOrder: z.number().int().min(0).max(9999).default(100),
 });
 
 adminRouter.get('/lenders', async (_req, res) => {
-  const rows = await db('lenders').orderBy('name').select('*');
+  // The image bytes stay out of the list; the page shows the logo through its public URL.
+  const rows = await db('lenders')
+    .orderBy('name')
+    .select(
+      'id',
+      'name',
+      'lender_type',
+      'regulator',
+      'website',
+      'grievance_contact',
+      'is_sample',
+      'active',
+      'logo_updated_at',
+      'show_on_home',
+      'display_order',
+    );
   res.json({
     data: rows.map((l: Record<string, unknown>) => ({
       id: l.id,
@@ -385,6 +403,9 @@ adminRouter.get('/lenders', async (_req, res) => {
       grievanceContact: l.grievance_contact,
       isSample: l.is_sample,
       active: l.active,
+      logoPath: logoPath(l.id as string, l.logo_updated_at as Date | null),
+      showOnHome: l.show_on_home,
+      displayOrder: l.display_order,
     })),
   });
 });
@@ -396,6 +417,8 @@ const lenderRow = (b: z.infer<typeof lenderSchema>) => ({
   website: b.website ?? null,
   grievance_contact: b.grievanceContact ?? null,
   active: b.active,
+  show_on_home: b.showOnHome,
+  display_order: b.displayOrder,
   is_sample: false,
 });
 
@@ -412,6 +435,34 @@ adminRouter.put('/lenders/:id', requireAdmin, validate(lenderSchema), async (req
   if (!n) throw notFound('Lender');
   await audit(res.locals.staff!.id, 'update', 'lender', req.params.id as string);
   res.json({ ok: true });
+});
+
+// The image is the raw request body. The type comes from its bytes, not from the Content-Type header.
+adminRouter.put(
+  '/lenders/:id/logo',
+  requireAdmin,
+  express.raw({ type: () => true, limit: LOGO_MAX_BYTES }),
+  async (req, res) => {
+    const body = req.body as unknown;
+    const bytes = Buffer.isBuffer(body) ? body : Buffer.alloc(0);
+    const mime = sniffImage(bytes);
+    if (!mime) throw new AppError(422, 'logo_invalid', 'Upload a PNG, JPEG or WebP image up to 200 KB');
+    const n = await db('lenders')
+      .where({ id: req.params.id })
+      .update({ logo: bytes, logo_mime: mime, logo_updated_at: db.fn.now(), updated_at: db.fn.now() });
+    if (!n) throw notFound('Lender');
+    await audit(res.locals.staff!.id, 'update_logo', 'lender', req.params.id as string);
+    res.json({ ok: true });
+  },
+);
+
+adminRouter.delete('/lenders/:id/logo', requireAdmin, async (req, res) => {
+  const n = await db('lenders')
+    .where({ id: req.params.id })
+    .update({ logo: null, logo_mime: null, logo_updated_at: null, updated_at: db.fn.now() });
+  if (!n) throw notFound('Lender');
+  await audit(res.locals.staff!.id, 'remove_logo', 'lender', req.params.id as string);
+  res.status(204).end();
 });
 
 const rateCardSchema = z

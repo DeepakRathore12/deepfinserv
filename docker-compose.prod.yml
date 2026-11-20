@@ -1,0 +1,106 @@
+# Production stack for one Docker host (an EC2 instance): Postgres, API, web, Nginx and certbot.
+# Setup and day-to-day commands are in docs/deployment-docker.md. All settings come from .env (copy .env.example).
+# Only Nginx is exposed to the internet; the database, API and web containers are reachable only inside Docker.
+name: deepfinserv
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: '10m', max-file: '3' }
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dk
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: dk_finance
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U dk -d dk_finance']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: *logging
+
+  api:
+    build:
+      context: .
+      dockerfile: infra/docker/backend.Dockerfile
+    image: deepfinserv-api:latest
+    restart: unless-stopped
+    init: true
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: '4000'
+      DATABASE_URL: postgres://dk:${POSTGRES_PASSWORD}@db:5432/dk_finance
+      DATABASE_SSL: 'false'
+      CORS_ORIGINS: ${SITE_URL:?Set SITE_URL in .env}
+      DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?Set DATA_ENCRYPTION_KEY in .env}
+      HASH_PEPPER: ${HASH_PEPPER:?Set HASH_PEPPER in .env}
+      TOKEN_SECRET: ${TOKEN_SECRET:?Set TOKEN_SECRET in .env}
+      OTP_PROVIDER: ${OTP_PROVIDER:-msg91}
+      MSG91_AUTH_KEY: ${MSG91_AUTH_KEY:-}
+      MSG91_TEMPLATE_ID: ${MSG91_TEMPLATE_ID:-}
+      BUREAU_PROVIDER: none
+      SESSION_TTL_HOURS: '12'
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      db: { condition: service_healthy }
+    logging: *logging
+
+  web:
+    build:
+      context: .
+      dockerfile: infra/docker/frontend.Dockerfile
+      args:
+        NEXT_PUBLIC_SITE_URL: ${SITE_URL:?Set SITE_URL in .env}
+        NEXT_PUBLIC_GTM_ID: ${GTM_ID:-}
+        NEXT_PUBLIC_GA4_ID: ${GA4_ID:-}
+        NEXT_PUBLIC_GSC_VERIFICATION: ${GSC_VERIFICATION:-}
+        NEXT_PUBLIC_ALLOW_INDEXING: ${ALLOW_INDEXING:-false}
+        API_INTERNAL_URL: http://api:4000/api/v1
+    image: deepfinserv-web:latest
+    restart: unless-stopped
+    init: true
+    environment:
+      API_INTERNAL_URL: http://api:4000/api/v1
+    depends_on:
+      api: { condition: service_healthy }
+    logging: *logging
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - '${HTTP_PORT:-80}:80'
+      - '${HTTPS_PORT:-443}:443'
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+      NGINX_ENVSUBST_FILTER: DOMAIN
+    volumes:
+      - ./infra/nginx/${NGINX_CONF:-prod-https}.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./infra/nginx/reload-certs.sh:/docker-entrypoint.d/90-reload-certs.sh:ro
+      - certbot-conf:/etc/letsencrypt:ro
+      - certbot-www:/var/www/certbot:ro
+    depends_on:
+      web: { condition: service_healthy }
+      api: { condition: service_healthy }
+    logging: *logging
+
+  # Renews the Let's Encrypt certificate (twice a day it checks; it only renews inside the last 30 days).
+  certbot:
+    image: certbot/certbot:latest
+    restart: unless-stopped
+    volumes:
+      - certbot-conf:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    entrypoint: >-
+      /bin/sh -c 'trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done'
+    logging: *logging
+
+volumes:
+  pgdata:
+  certbot-conf:
+  certbot-www:
