@@ -18,6 +18,10 @@ FROM node:22-bookworm-slim
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=build --chown=node:node /out ./
+# Amazon's RDS certificate authorities. RDS certificates are not signed by a CA that Node trusts by default,
+# so without this the TLS connection to an RDS database (DATABASE_SSL=true) is refused.
+ADD --chown=node:node --chmod=644 https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /home/node/rds-global-bundle.pem
+ENV NODE_EXTRA_CA_CERTS=/home/node/rds-global-bundle.pem
 USER node
 EXPOSE 4000
 HEALTHCHECK --interval=30s --timeout=3s CMD node -e "fetch('http://127.0.0.1:4000/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"

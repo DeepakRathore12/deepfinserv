@@ -1,13 +1,13 @@
 # Deploying DeepFinServ on EC2 with Docker
 
-One server, five containers: **db** (Postgres 16), **api**, **web** (Next.js), **nginx** (the only thing exposed to the internet) and **certbot** (free HTTPS certificates, renewed automatically).
+One server, four or five containers: **api**, **web** (Next.js), **nginx** (the only thing exposed to the internet), **certbot** (free HTTPS certificates, renewed automatically) and, optionally, **db** (Postgres 16 in Docker). The database can instead be **AWS RDS** (recommended): see "Database" in step 4.
 
 ```
 internet -> nginx :80/:443 -> web :3000   (pages)
-                           -> api :4000   (/api/*) -> db :5432
+                           -> api :4000   (/api/*) -> database (RDS :5432, or the db container)
 ```
 
-Only nginx publishes ports. The database, API and web are reachable only inside the Docker network.
+Only nginx publishes ports. The API and web are reachable only inside the Docker network.
 
 ## 0. Before you start
 
@@ -82,9 +82,31 @@ nano .env
 Generate the secrets on the server:
 
 ```bash
-openssl rand -hex 24      # POSTGRES_PASSWORD
+openssl rand -hex 24      # POSTGRES_PASSWORD (only if the database runs in Docker)
 openssl rand -base64 32   # run three times: DATA_ENCRYPTION_KEY, HASH_PEPPER, TOKEN_SECRET
 ```
+
+### Database
+
+**AWS RDS (recommended).** In the RDS console note the endpoint, the master username and password (letters and digits only, because they go into a URL). Then:
+
+1. The RDS security group must allow inbound **5432 from the EC2 instance's security group** (not from the internet). Keep "Public access" off if EC2 and RDS are in the same VPC.
+2. Create the database once:
+
+   ```bash
+   docker run --rm -e PGPASSWORD='<RDS_PASSWORD>' postgres:16-alpine \
+     psql "host=<RDS_ENDPOINT> port=5432 user=<RDS_USER> dbname=postgres sslmode=require" -c "CREATE DATABASE dk_finance"
+   ```
+3. In `.env`:
+
+   ```
+   DATABASE_URL=postgres://<RDS_USER>:<RDS_PASSWORD>@<RDS_ENDPOINT>:5432/dk_finance
+   DATABASE_SSL=true
+   ```
+   Leave `COMPOSE_PROFILES` unset so the `db` container does not start. The API image already contains Amazon's RDS certificate bundle, so the connection is encrypted and verified.
+4. Turn on automated backups in RDS (Modify -> Backup retention, 7 days or more) and take a manual snapshot before each update. `backup-db.sh` is for the Docker database only.
+
+**Postgres in Docker.** Set `COMPOSE_PROFILES=localdb`, `DATABASE_URL=postgres://dk:<POSTGRES_PASSWORD>@db:5432/dk_finance` and `DATABASE_SSL=false`. Use `backup-db.sh` (step 9).
 
 **Back up the three keys somewhere other than this server** (password manager). Customer data is encrypted with them. If they are lost, the stored mobile numbers, emails and PAN data cannot be read again.
 
@@ -94,7 +116,7 @@ openssl rand -base64 32   # run three times: DATA_ENCRYPTION_KEY, HASH_PEPPER, T
 COMPOSE_FILE=docker-compose.prod.yml
 DOMAIN=deepfinserv.in
 LETSENCRYPT_EMAIL=you@example.com
-SITE_URL=https://www.deepfinserv.in
+SITE_URL=https://deepfinserv.in
 NGINX_CONF=prod-https
 COOKIE_SECURE=true
 ALLOW_INDEXING=false          # set true on launch day, then rebuild web (step 8)
@@ -120,7 +142,7 @@ If you have no domain yet, test over plain HTTP by setting `NGINX_CONF=prod-http
 ```bash
 docker compose build api
 docker compose build web
-docker compose up -d db api web
+docker compose up -d api web      # also starts the db container when COMPOSE_PROFILES=localdb
 
 # create tables, then seed lenders and the catalogue
 docker compose run --rm api node dist/database/cli.js migrate
@@ -138,7 +160,15 @@ Build `api` and `web` one at a time, as shown above. Building both together can 
 
 ## 6. Point the domain and turn on HTTPS
 
-1. At your DNS provider create **A records**: `deepfinserv.in` and `www.deepfinserv.in` -> the Elastic IP. Wait until `nslookup deepfinserv.in` returns that IP.
+1. **GoDaddy DNS.** My Products -> the domain -> **DNS** (Manage DNS). Then:
+   - Delete the default **A** record for `@` (it points to GoDaddy's parking page) and the default **CNAME** for `www` (a CNAME cannot sit next to an A record with the same name).
+   - Delete any **domain forwarding** under the Forwarding tab.
+   - Add **A** `@` -> the Elastic IP, TTL 600 seconds.
+   - Add **A** `www` -> the same Elastic IP, TTL 600 seconds.
+   - Do not add AAAA (IPv6) records.
+
+   The Elastic IP must be attached to the instance, and ports 80 and 443 open in its security group. Wait until both names return that IP (usually 5 to 30 minutes): `nslookup deepfinserv.in` and `nslookup www.deepfinserv.in`, or check at https://dnschecker.org. Do not run `init-ssl.sh` before that, or Let's Encrypt fails.
+   Then set in `.env`: `DOMAIN=deepfinserv.in`, `LETSENCRYPT_EMAIL=<your email>`, `SITE_URL=https://deepfinserv.in`, `NGINX_CONF=prod-https`, `COOKIE_SECURE=true`, and rebuild `web` (`SITE_URL` is baked in): `docker compose build web && docker compose up -d`.
 2. Run:
 
    ```bash
@@ -146,7 +176,7 @@ Build `api` and `web` one at a time, as shown above. Building both together can 
    ```
 
    To rehearse without hitting Let's Encrypt rate limits, run `STAGING=1 bash infra/scripts/init-ssl.sh` first (browsers will show a warning), then `FORCE=1 bash infra/scripts/init-ssl.sh` for the real one.
-3. Open `https://www.deepfinserv.in`. The apex redirects to `www`. Certificates renew automatically and nginx reloads every 6 hours to pick them up.
+3. Open `https://deepfinserv.in`. `www.deepfinserv.in` redirects to it. Certificates renew automatically and nginx reloads every 6 hours to pick them up.
 
 For a plain-HTTP-only setup (`NGINX_CONF=prod-http`), skip this step and run `docker compose up -d nginx`.
 
@@ -154,7 +184,7 @@ For a plain-HTTP-only setup (`NGINX_CONF=prod-http`), skip this step and run `do
 
 ```bash
 docker compose ps                       # all "healthy" / "running"
-curl -s https://www.deepfinserv.in/api/v1/health
+curl -s https://deepfinserv.in/api/v1/health
 docker compose logs -f api              # Ctrl+C to leave
 ```
 
@@ -180,6 +210,8 @@ Changes to `SITE_URL`, `GTM_ID`, `GA4_ID`, `GSC_VERIFICATION` or `ALLOW_INDEXING
 
 ## 9. Backups
 
+With **RDS**, use RDS automated backups and snapshots (step 4); the rest of this section is for the Docker database.
+
 ```bash
 bash infra/scripts/backup-db.sh        # writes ./backups/dk-<timestamp>.sql.gz, keeps the newest 14
 crontab -e
@@ -202,7 +234,8 @@ gunzip -c backups/<file>.sql.gz | docker compose exec -T db psql -U dk dk_financ
 | Restart one service | `docker compose restart api` |
 | Stop everything | `docker compose down` (data is kept) |
 | Disk usage | `docker system df`; clean with `docker image prune -f` |
-| Database shell | `docker compose exec db psql -U dk dk_finance` |
+| Database shell (Docker db) | `docker compose exec db psql -U dk dk_finance` |
+| Database shell (RDS) | `docker run --rm -it postgres:16-alpine psql "<DATABASE_URL>?sslmode=require"` |
 
 **Never** run `docker compose down -v`: it deletes the database volume and the certificates.
 

@@ -8,6 +8,12 @@
 # Keep that key somewhere else too, and copy the backups off the server (S3, or an EBS snapshot of the disk).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+# This script only covers the database that runs in Docker. With AWS RDS, turn on automated backups instead
+# (RDS console -> Modify -> Backup retention, 7 days or more) and take a manual snapshot before each update.
+if ! grep -qE '^COMPOSE_PROFILES=.*localdb' .env 2>/dev/null; then
+  echo "The database is not the Docker one (RDS). Use RDS automated backups or snapshots; nothing to do here." >&2
+  exit 1
+fi
 mkdir -p backups
 OUT="backups/dk_finance-$(date +%F-%H%M).sql.gz"
 docker compose -f docker-compose.prod.yml exec -T db pg_dump -U dk --no-owner dk_finance | gzip > "$OUT"
